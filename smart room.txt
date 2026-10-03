@@ -1,0 +1,560 @@
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
+
+// ==================================================
+// PIN CONNECTIONS
+// ==================================================
+
+// PIR sensors
+#define PIR_A_PIN 27       // Outside PIR
+#define PIR_B_PIN 33       // Inside PIR
+
+// Gas sensor
+#define GAS_PIN 34
+
+// DS18B20
+#define TEMP_PIN 4
+
+// Servo
+#define SERVO_PIN 13
+
+// LEDs
+#define LED1_PIN 25
+#define LED2_PIN 26
+
+// OLED
+#define OLED_SDA 21
+#define OLED_SCL 22
+
+
+// ==================================================
+// OLED
+// ==================================================
+
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+
+Adafruit_SSD1306 display(
+  SCREEN_WIDTH,
+  SCREEN_HEIGHT,
+  &Wire,
+  -1
+);
+
+
+// ==================================================
+// DS18B20
+// ==================================================
+
+OneWire oneWire(TEMP_PIN);
+DallasTemperature temperatureSensor(&oneWire);
+
+
+// ==================================================
+// GAS SENSOR
+// ==================================================
+
+int gasThreshold = 2000;
+
+
+// ==================================================
+// SERVO
+// ==================================================
+
+#define SERVO_FREQUENCY 50
+#define SERVO_RESOLUTION 16
+
+
+// ==================================================
+// PEOPLE COUNT
+// ==================================================
+
+int peopleCount = 0;
+
+
+// ==================================================
+// PIR STATE
+// ==================================================
+
+int previousPIR_A = LOW;
+int previousPIR_B = LOW;
+
+
+// ==================================================
+// DIRECTION DETECTION
+// ==================================================
+
+// 0 = waiting
+// 1 = A detected first, waiting for B
+// 2 = B detected first, waiting for A
+
+int movementState = 0;
+
+unsigned long movementStartTime = 0;
+
+// Maximum time allowed between the two PIR detections
+const unsigned long movementTimeout = 3000;
+
+
+// ==================================================
+// SERVO FUNCTION
+// ==================================================
+
+void moveServo(int angle)
+{
+  int pulseWidth = map(
+    angle,
+    0,
+    180,
+    500,
+    2500
+  );
+
+  uint32_t duty =
+    (pulseWidth * 65535UL) / 20000UL;
+
+  ledcWrite(SERVO_PIN, duty);
+}
+
+
+// ==================================================
+// SETUP
+// ==================================================
+
+void setup()
+{
+  Serial.begin(115200);
+
+
+  // -------------------------------
+  // PIR
+  // -------------------------------
+
+  pinMode(PIR_A_PIN, INPUT);
+  pinMode(PIR_B_PIN, INPUT);
+
+
+  // -------------------------------
+  // GAS SENSOR
+  // -------------------------------
+
+  pinMode(GAS_PIN, INPUT);
+
+
+  // -------------------------------
+  // LEDs
+  // -------------------------------
+
+  pinMode(LED1_PIN, OUTPUT);
+  pinMode(LED2_PIN, OUTPUT);
+
+  digitalWrite(LED1_PIN, LOW);
+  digitalWrite(LED2_PIN, LOW);
+
+
+  // -------------------------------
+  // DS18B20
+  // -------------------------------
+
+  temperatureSensor.begin();
+
+
+  // -------------------------------
+  // SERVO
+  // -------------------------------
+
+  ledcAttach(
+    SERVO_PIN,
+    SERVO_FREQUENCY,
+    SERVO_RESOLUTION
+  );
+
+  // Window initially closed
+  moveServo(0);
+
+
+  // -------------------------------
+  // OLED
+  // -------------------------------
+
+  Wire.begin(
+    OLED_SDA,
+    OLED_SCL
+  );
+
+  if (!display.begin(
+        SSD1306_SWITCHCAPVCC,
+        0x3C))
+  {
+    Serial.println("OLED not found!");
+
+    while (1);
+  }
+
+
+  // -------------------------------
+  // STARTING SCREEN
+  // -------------------------------
+
+  display.clearDisplay();
+
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(1);
+
+  display.setCursor(20, 20);
+  display.println("SMART BUILDING");
+
+  display.setCursor(35, 35);
+  display.println("SYSTEM");
+
+  display.display();
+
+  delay(2000);
+}
+
+
+// ==================================================
+// LOOP
+// ==================================================
+
+void loop()
+{
+  // =================================================
+  // READ PIR SENSORS
+  // =================================================
+
+  int pirA = digitalRead(PIR_A_PIN);
+  int pirB = digitalRead(PIR_B_PIN);
+
+
+  // =================================================
+  // DETECT NEW PIR EVENTS
+  // =================================================
+
+  bool newA = (
+    pirA == HIGH &&
+    previousPIR_A == LOW
+  );
+
+  bool newB = (
+    pirB == HIGH &&
+    previousPIR_B == LOW
+  );
+
+
+  // =================================================
+  // DIRECTION DETECTION
+  // =================================================
+
+  unsigned long currentTime = millis();
+
+
+  // -------------------------------------------------
+  // STATE 0: WAITING FOR FIRST PIR
+  // -------------------------------------------------
+
+  if (movementState == 0)
+  {
+
+    // A detected first
+    if (newA)
+    {
+      movementState = 1;
+
+      movementStartTime = currentTime;
+
+      Serial.println("PIR A detected first");
+      Serial.println("Waiting for PIR B...");
+    }
+
+
+    // B detected first
+    else if (newB)
+    {
+      movementState = 2;
+
+      movementStartTime = currentTime;
+
+      Serial.println("PIR B detected first");
+      Serial.println("Waiting for PIR A...");
+    }
+  }
+
+
+  // -------------------------------------------------
+  // STATE 1
+  // A → B = ENTERING
+  // -------------------------------------------------
+
+  else if (movementState == 1)
+  {
+
+    if (newB)
+    {
+      // Person entered
+
+      peopleCount++;
+
+      Serial.println("PERSON ENTERED");
+
+      Serial.print("People inside: ");
+      Serial.println(peopleCount);
+
+      // Reset
+      movementState = 0;
+    }
+  }
+
+
+  // -------------------------------------------------
+  // STATE 2
+  // B → A = LEAVING
+  // -------------------------------------------------
+
+  else if (movementState == 2)
+  {
+
+    if (newA)
+    {
+      // Person left
+
+      if (peopleCount > 0)
+      {
+        peopleCount--;
+      }
+
+      Serial.println("PERSON LEFT");
+
+      Serial.print("People inside: ");
+      Serial.println(peopleCount);
+
+      // Reset
+      movementState = 0;
+    }
+  }
+
+
+  // =================================================
+  // MOVEMENT TIMEOUT
+  // =================================================
+
+  if (
+    movementState != 0 &&
+    currentTime - movementStartTime > movementTimeout
+  )
+  {
+    // Movement sequence was incomplete
+
+    movementState = 0;
+
+    Serial.println("Movement timeout");
+  }
+
+
+  // =================================================
+  // SAVE PIR STATES
+  // =================================================
+
+  previousPIR_A = pirA;
+  previousPIR_B = pirB;
+
+
+  // =================================================
+  // LIGHT CONTROL
+  // =================================================
+
+  if (peopleCount > 0)
+  {
+    // Someone is inside
+
+    digitalWrite(LED1_PIN, HIGH);
+    digitalWrite(LED2_PIN, HIGH);
+  }
+  else
+  {
+    // Room empty
+
+    digitalWrite(LED1_PIN, LOW);
+    digitalWrite(LED2_PIN, LOW);
+  }
+
+
+  // =================================================
+  // GAS SENSOR
+  // =================================================
+
+  int gasValue = analogRead(GAS_PIN);
+
+  bool gasDetected = false;
+
+  if (gasValue > gasThreshold)
+  {
+    gasDetected = true;
+  }
+
+
+  // =================================================
+  // DS18B20 TEMPERATURE
+  // =================================================
+
+  temperatureSensor.requestTemperatures();
+
+  float temperature =
+    temperatureSensor.getTempCByIndex(0);
+
+
+  // =================================================
+  // WINDOW CONTROL
+  // =================================================
+
+  bool windowOpen = false;
+
+
+  // GAS HAS HIGHEST PRIORITY
+  if (gasDetected)
+  {
+    moveServo(90);
+
+    windowOpen = true;
+  }
+
+
+  // TEMPERATURE BELOW 25
+  else if (
+    temperature != DEVICE_DISCONNECTED_C &&
+    temperature < 25.0
+  )
+  {
+    moveServo(90);
+
+    windowOpen = true;
+  }
+
+
+  // NORMAL CONDITION
+  else
+  {
+    moveServo(0);
+
+    windowOpen = false;
+  }
+
+
+  // =================================================
+  // OLED DISPLAY
+  // =================================================
+
+  display.clearDisplay();
+
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(1);
+
+
+  // Title
+  display.setCursor(20, 0);
+  display.println("SMART BUILDING");
+
+
+  // People
+  display.setCursor(0, 11);
+
+  display.print("People: ");
+  display.println(peopleCount);
+
+
+  // Motion
+  display.setCursor(0, 22);
+
+  if (pirA == HIGH || pirB == HIGH)
+  {
+    display.println("Motion: DETECTED");
+  }
+  else
+  {
+    display.println("Motion: NONE");
+  }
+
+
+  // Gas
+  display.setCursor(0, 33);
+
+  if (gasDetected)
+  {
+    display.println("Gas: DETECTED!");
+  }
+  else
+  {
+    display.println("Gas: SAFE");
+  }
+
+
+  // Temperature
+  display.setCursor(0, 44);
+
+  if (temperature == DEVICE_DISCONNECTED_C)
+  {
+    display.println("Temp: ERROR");
+  }
+  else
+  {
+    display.print("Temp: ");
+    display.print(temperature, 1);
+    display.println(" C");
+  }
+
+
+  // Window
+  display.setCursor(0, 55);
+
+  if (windowOpen)
+  {
+    display.println("Window: OPEN");
+  }
+  else
+  {
+    display.println("Window: CLOSED");
+  }
+
+
+  display.display();
+
+
+  // =================================================
+  // SERIAL MONITOR
+  // =================================================
+
+  Serial.println();
+  Serial.println("==========================");
+
+  Serial.print("PIR A: ");
+  Serial.println(pirA);
+
+  Serial.print("PIR B: ");
+  Serial.println(pirB);
+
+  Serial.print("People inside: ");
+  Serial.println(peopleCount);
+
+  Serial.print("Gas Value: ");
+  Serial.println(gasValue);
+
+  Serial.print("Temperature: ");
+  Serial.print(temperature);
+  Serial.println(" C");
+
+  Serial.print("Window: ");
+
+  if (windowOpen)
+  {
+    Serial.println("OPEN");
+  }
+  else
+  {
+    Serial.println("CLOSED");
+  }
+
+  delay(100);
+}
