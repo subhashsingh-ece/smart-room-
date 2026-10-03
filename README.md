@@ -94,3 +94,4 @@ OUTSIDE
 [PIR-B]
    |
  ROOM
+project link- https://wokwi.com/projects/476855236580597761
